@@ -68,7 +68,25 @@ bun run build:all   # builds all four
 bun run build:linux-arm64
 ```
 
-Output lands in `dist/`. These are intended to be attached to GitHub releases so end users `curl` a binary instead of installing Bun.
+Output lands in `dist/`. End users typically don't run this — binaries get attached to GitHub releases automatically (see below).
+
+## Releases
+
+Pushing a version tag (e.g. `v0.1.0`) triggers `.github/workflows/release.yml`, which builds the gateway as a single self-contained executable for each supported platform and attaches all four to a GitHub Release alongside SHA-256 checksums. End users (and the `cookiedclaw-claude-code` adapter's installer) `curl` the binary they need — no Bun install required on the host.
+
+Cutting a release:
+
+```bash
+git tag v0.1.0
+git push --tags
+```
+
+Available platforms (matches `bun build --compile --target=<…>`):
+
+- `cookiedclaw-gateway-linux-x64`
+- `cookiedclaw-gateway-linux-arm64`
+- `cookiedclaw-gateway-darwin-arm64`
+- `cookiedclaw-gateway-darwin-x64`
 
 ## Roadmap
 

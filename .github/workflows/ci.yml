@@ -1,0 +1,40 @@
+name: ci
+
+# Smoke checks on every push to main and on every PR: typecheck, plus a
+# single-platform compile to catch entry-point breakage early. Full
+# multi-platform builds run on tag push (see release.yml).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Smoke compile (linux-x64)
+        run: bun run build:linux-x64
+
+      - name: Verify binary runs
+        run: |
+          GATEWAY_TOKEN=ci-smoke-test \
+          GATEWAY_PORT=47393 \
+          timeout 3 ./dist/cookiedclaw-gateway-linux-x64 \
+            > /tmp/gateway.stdout 2> /tmp/gateway.stderr || true
+          # Exit 124 (timeout) means the gateway started cleanly and
+          # we killed it. Anything else is a startup failure.
+          grep -F "MCP-over-HTTP on http" /tmp/gateway.stderr
