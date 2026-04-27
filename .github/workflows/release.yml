@@ -32,9 +32,10 @@ jobs:
           - target: darwin-arm64
             runner: macos-latest
             bun_target: bun-darwin-arm64
-          - target: darwin-x64
-            runner: macos-13
-            bun_target: bun-darwin-x64
+          # darwin-x64 dropped — GitHub's macos-13 (x64) free runner is
+          # gone, and Apple Silicon is the only macOS that matters for
+          # new installs. Add back via macos-14-large or self-hosted
+          # runner if Intel-mac demand shows up.
 
     steps:
       - uses: actions/checkout@v4
