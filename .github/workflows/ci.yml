@@ -31,7 +31,7 @@ jobs:
 
       - name: Verify binary runs
         run: |
-          GATEWAY_TOKEN=ci-smoke-test \
+          COOKIEDCLAW_GATEWAY_TOKEN=ci-smoke-test \
           GATEWAY_PORT=47393 \
           timeout 3 ./dist/cookiedclaw-gateway-linux-x64 \
             > /tmp/gateway.stdout 2> /tmp/gateway.stderr || true
