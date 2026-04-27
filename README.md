@@ -86,7 +86,8 @@ Available platforms (matches `bun build --compile --target=<…>`):
 - `cookiedclaw-gateway-linux-x64`
 - `cookiedclaw-gateway-linux-arm64`
 - `cookiedclaw-gateway-darwin-arm64`
-- `cookiedclaw-gateway-darwin-x64`
+
+Intel-mac (`darwin-x64`) is intentionally not built — GitHub Actions removed the free `macos-13` runner. If you need it, build locally with `bun build --compile --target=bun-darwin-x64 ./src/gateway.ts` or open an issue.
 
 ## Roadmap
 
