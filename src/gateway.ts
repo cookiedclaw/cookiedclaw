@@ -41,6 +41,11 @@ import "./tools.ts";
 import "./inbound.ts";
 import "./permission-relay.ts";
 
+// Bumped per release. Surfaced via `/health` and used by the
+// auto-update check on session init to compare against
+// github.com/cookiedclaw/cookiedclaw releases/latest.
+const SELF_VERSION = "0.1.2";
+
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 47390);
 const GATEWAY_HOST = process.env.GATEWAY_HOST ?? "127.0.0.1";
 // Brand-prefixed name; same one the adapter's .mcp.json and the setup
@@ -86,6 +91,72 @@ function isInitializeRequest(body: unknown): boolean {
   return m === "initialize";
 }
 
+// Auto-update notice — on every session-init we check GitHub releases
+// for a newer tag and (if any) emit a single channel notification so
+// the agent can mention it to the user. Cached for an hour to avoid
+// hammering api.github.com on adapter reconnect storms.
+const UPDATE_CHECK_TTL_MS = 60 * 60 * 1000;
+let updateCache:
+  | { available: false; checkedAt: number }
+  | { available: true; latest: string; checkedAt: number }
+  | null = null;
+
+async function checkForUpdate(): Promise<void> {
+  if (updateCache && Date.now() - updateCache.checkedAt < UPDATE_CHECK_TTL_MS) {
+    return;
+  }
+  try {
+    const resp = await fetch(
+      "https://api.github.com/repos/cookiedclaw/cookiedclaw/releases/latest",
+      {
+        headers: { Accept: "application/vnd.github+json" },
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    if (!resp.ok) {
+      // Don't poison the cache on transient errors — leave whatever
+      // we had so the next session-init re-tries.
+      console.error(`[gateway] update check failed: HTTP ${resp.status}`);
+      return;
+    }
+    const data = (await resp.json()) as { tag_name?: string };
+    const latest = (data.tag_name ?? "").replace(/^v/, "");
+    if (latest && latest !== SELF_VERSION) {
+      updateCache = { available: true, latest, checkedAt: Date.now() };
+      console.error(
+        `[gateway] update available: v${SELF_VERSION} -> v${latest}`,
+      );
+    } else {
+      updateCache = { available: false, checkedAt: Date.now() };
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[gateway] update check errored: ${msg}`);
+  }
+}
+
+async function notifyUpdateIfAvailable(): Promise<void> {
+  await checkForUpdate();
+  if (!updateCache?.available) return;
+  try {
+    await mcp.server.notification({
+      method: "notifications/claude/channel",
+      params: {
+        content: `cookiedclaw gateway update available: v${SELF_VERSION} → v${updateCache.latest}. Run \`/cookiedclaw:setup\` to upgrade — wizard re-downloads the latest binary, idempotent on existing config.`,
+        meta: {
+          kind: "update_available",
+          source: "cookiedclaw",
+          current: SELF_VERSION,
+          latest: updateCache.latest,
+        },
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[gateway] update notification failed: ${msg}`);
+  }
+}
+
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -118,7 +189,7 @@ const server = createServer(async (req, res) => {
       JSON.stringify({
         status: "ok",
         bot_polling: hasToken,
-        version: "0.1.0",
+        version: SELF_VERSION,
       }),
     );
     return;
@@ -152,6 +223,10 @@ const server = createServer(async (req, res) => {
           onsessioninitialized: (sid: string) => {
             transports.set(sid, newTransport);
             console.error(`[gateway] /mcp session opened: ${sid}`);
+            // Tell the new client about an available update, if any.
+            // Fire-and-forget — failures are logged in the helper and
+            // shouldn't block the session from being usable.
+            void notifyUpdateIfAvailable();
           },
         });
         newTransport.onclose = () => {
