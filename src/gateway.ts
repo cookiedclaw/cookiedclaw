@@ -65,16 +65,26 @@ await loadAccess();
 await loadPending();
 await startProgressServer();
 
-// One transport per gateway process. Adapters connect with an arbitrary
-// session ID (we generate one on first request via sessionIdGenerator)
-// and reuse it for the lifetime of their connection. Reconnects after
-// crashes get a fresh session, which is fine — no per-session state we
-// need to preserve here.
-const transport = new StreamableHTTPServerTransport({
-  sessionIdGenerator: () => crypto.randomUUID(),
-});
+// One transport PER MCP session. The MCP SDK's StreamableHTTP transport
+// is single-session by design — once an `initialize` request lands and
+// a session ID is issued, that transport instance binds to the client
+// that opened it. A second client (or the same client reconnecting
+// after restart) hitting the same transport gets a 400 because the
+// transport is already in a non-initialize state.
+//
+// Pattern: keep a Map<sessionId, transport>. On a POST without a
+// session ID that contains an `initialize` request, mint a fresh
+// transport, connect a fresh McpServer to it, and remember the
+// transport under the issued session ID. Subsequent requests with
+// that session ID route to the same transport. Stale session IDs get
+// 404 so the client knows to re-initialize.
+const transports = new Map<string, StreamableHTTPServerTransport>();
 
-await mcp.connect(transport);
+function isInitializeRequest(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const m = (body as { method?: unknown }).method;
+  return m === "initialize";
+}
 
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -126,6 +136,56 @@ const server = createServer(async (req, res) => {
   if (url === "/mcp" || url.startsWith("/mcp?")) {
     try {
       const body = req.method === "POST" ? await readBody(req) : undefined;
+      const sessionHeader = req.headers["mcp-session-id"];
+      const sessionId = Array.isArray(sessionHeader)
+        ? sessionHeader[0]
+        : sessionHeader;
+
+      let transport: StreamableHTTPServerTransport;
+      if (sessionId && transports.has(sessionId)) {
+        transport = transports.get(sessionId)!;
+      } else if (!sessionId && req.method === "POST" && isInitializeRequest(body)) {
+        // New session: mint transport, connect a fresh McpServer copy,
+        // register on session-init.
+        const newTransport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+          onsessioninitialized: (sid: string) => {
+            transports.set(sid, newTransport);
+            console.error(`[gateway] /mcp session opened: ${sid}`);
+          },
+        });
+        newTransport.onclose = () => {
+          // Remove stale entries when transport closes; client must
+          // re-initialize on next request.
+          for (const [sid, t] of transports) {
+            if (t === newTransport) {
+              transports.delete(sid);
+              console.error(`[gateway] /mcp session closed: ${sid}`);
+              break;
+            }
+          }
+        };
+        await mcp.connect(newTransport);
+        transport = newTransport;
+      } else {
+        // Missing or stale session ID and not an initialize — tell the
+        // client to start over with a fresh init.
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message: sessionId
+                ? `Unknown or expired session: ${sessionId}`
+                : "Initialize first (POST /mcp with method=initialize)",
+            },
+            id: null,
+          }),
+        );
+        return;
+      }
+
       await transport.handleRequest(req, res, body);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
