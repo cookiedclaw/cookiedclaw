@@ -43,11 +43,15 @@ import "./permission-relay.ts";
 
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 47390);
 const GATEWAY_HOST = process.env.GATEWAY_HOST ?? "127.0.0.1";
-const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN;
+// Brand-prefixed name; same one the adapter's .mcp.json and the setup
+// wizard write into keys.env. There's no unprefixed legacy form to
+// support — gateway has only ever existed with the prefix; the
+// inconsistency was a code typo, not historical baggage.
+const GATEWAY_TOKEN = process.env.COOKIEDCLAW_GATEWAY_TOKEN;
 
 if (!GATEWAY_TOKEN) {
   console.error(
-    "[gateway] FATAL: GATEWAY_TOKEN env var is required. This is the Bearer token adapters present to authenticate against the MCP-over-HTTP endpoint. Generate one with `openssl rand -hex 32` and set it in ~/.cookiedclaw/keys.env.",
+    "[gateway] FATAL: COOKIEDCLAW_GATEWAY_TOKEN env var is required. This is the Bearer token adapters present to authenticate against the MCP-over-HTTP endpoint. Generate one with `openssl rand -hex 32` and add it to your workspace's `.cookiedclaw/keys.env` (the setup wizard does this automatically).",
   );
   process.exit(1);
 }
