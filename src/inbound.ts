@@ -22,7 +22,7 @@ import {
   stopTyping,
 } from "./chat-state.ts";
 import { sendFormatted, senderDisplayName } from "./format.ts";
-import { mcp } from "./mcp.ts";
+import { broadcastNotification } from "./mcp.ts";
 import { dlog, stopFlag } from "./paths.ts";
 import { deleteProgressMessage, schedulePush } from "./progress.ts";
 import { unlink } from "node:fs/promises";
@@ -110,16 +110,10 @@ async function forwardToCC(
   const prefixedContent = content.trim()
     ? `[${senderLabel}]: ${content}`
     : content;
-  try {
-    await mcp.server.notification({
-      method: "notifications/claude/channel",
-      params: { content: prefixedContent, meta },
-    });
-  } catch (err) {
-    console.error(
-      `[telegram] failed to push notification: ${err instanceof Error ? err.message : err}`,
-    );
-  }
+  await broadcastNotification({
+    method: "notifications/claude/channel",
+    params: { content: prefixedContent, meta },
+  });
 }
 
 /**
@@ -209,25 +203,19 @@ async function handleStopCommand(
   // still pending so any final-tool progress goes to them.
   addPending(chatId);
   dlog(`/stop: chat=${chatId} sender=${senderId} msg=${messageId}`);
-  try {
-    await mcp.server.notification({
-      method: "notifications/claude/channel",
-      params: {
-        content: "/stop",
-        meta: {
-          chat_id: chatId,
-          sender_id: senderId,
-          sender: senderLabel,
-          message_id: String(messageId),
-          is_stop: "true",
-        },
+  await broadcastNotification({
+    method: "notifications/claude/channel",
+    params: {
+      content: "/stop",
+      meta: {
+        chat_id: chatId,
+        sender_id: senderId,
+        sender: senderLabel,
+        message_id: String(messageId),
+        is_stop: "true",
       },
-    });
-  } catch (err) {
-    console.error(
-      `[telegram] failed to push /stop signal: ${err instanceof Error ? err.message : err}`,
-    );
-  }
+    },
+  });
 }
 
 /**

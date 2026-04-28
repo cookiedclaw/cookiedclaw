@@ -28,18 +28,25 @@
  *                            0.0.0.0 only behind a reverse proxy)
  */
 import { createServer, type IncomingMessage } from "node:http";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { loadAccess } from "./access.ts";
 import { bot } from "./bot.ts";
 import { loadPending } from "./chat-state.ts";
 import { allowAll, allowedUsers, hasToken } from "./env.ts";
-import { mcp } from "./mcp.ts";
+import {
+  broadcastNotification,
+  createMcpInstance,
+  disposeMcpInstance,
+} from "./mcp.ts";
 import { startProgressServer } from "./progress-server.ts";
 
-// Side-effect imports: each registers handlers / tools on `mcp` or `bot`.
-import "./tools.ts";
-import "./inbound.ts";
+// Side-effect import: bot.callbackQuery handler for permission-relay
+// verdict buttons (the per-instance MCP notification handler is wired
+// up inside createMcpInstance() in mcp.ts).
 import "./permission-relay.ts";
+// Side-effect import: bot.on(...) handlers for inbound Telegram traffic.
+import "./inbound.ts";
 
 // Bumped per release. Surfaced via `/health` and used by the
 // auto-update check on session init to compare against
@@ -70,20 +77,20 @@ await loadAccess();
 await loadPending();
 await startProgressServer();
 
-// One transport PER MCP session. The MCP SDK's StreamableHTTP transport
-// is single-session by design — once an `initialize` request lands and
-// a session ID is issued, that transport instance binds to the client
-// that opened it. A second client (or the same client reconnecting
-// after restart) hitting the same transport gets a 400 because the
-// transport is already in a non-initialize state.
+// Per-session McpServer + Transport pair. Both halves of the SDK are
+// single-connection by design — Server (the Protocol underneath
+// McpServer) can only be `connect()`-ed to one Transport at a time, and
+// StreamableHTTPServerTransport binds to one client after init. So each
+// new MCP-over-HTTP session gets its own pair; multiple concurrent
+// clients (CC reconnect storms, ad-hoc + daemon, etc.) each isolated.
 //
-// Pattern: keep a Map<sessionId, transport>. On a POST without a
-// session ID that contains an `initialize` request, mint a fresh
-// transport, connect a fresh McpServer to it, and remember the
-// transport under the issued session ID. Subsequent requests with
-// that session ID route to the same transport. Stale session IDs get
-// 404 so the client knows to re-initialize.
-const transports = new Map<string, StreamableHTTPServerTransport>();
+// Inbound notifications (Telegram messages, /stop, permission verdicts)
+// fan out to every active McpServer via broadcastNotification.
+type Session = {
+  transport: StreamableHTTPServerTransport;
+  mcp: McpServer;
+};
+const sessions = new Map<string, Session>();
 
 function isInitializeRequest(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
@@ -138,23 +145,18 @@ async function checkForUpdate(): Promise<void> {
 async function notifyUpdateIfAvailable(): Promise<void> {
   await checkForUpdate();
   if (!updateCache?.available) return;
-  try {
-    await mcp.server.notification({
-      method: "notifications/claude/channel",
-      params: {
-        content: `cookiedclaw gateway update available: v${SELF_VERSION} → v${updateCache.latest}. Run \`/cookiedclaw:setup\` to upgrade — wizard re-downloads the latest binary, idempotent on existing config.`,
-        meta: {
-          kind: "update_available",
-          source: "cookiedclaw",
-          current: SELF_VERSION,
-          latest: updateCache.latest,
-        },
+  await broadcastNotification({
+    method: "notifications/claude/channel",
+    params: {
+      content: `cookiedclaw gateway update available: v${SELF_VERSION} → v${updateCache.latest}. Run \`/cookiedclaw:setup\` to upgrade — wizard re-downloads the latest binary, idempotent on existing config.`,
+      meta: {
+        kind: "update_available",
+        source: "cookiedclaw",
+        current: SELF_VERSION,
+        latest: updateCache.latest,
       },
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[gateway] update notification failed: ${msg}`);
-  }
+    },
+  });
 }
 
 function readBody(req: IncomingMessage): Promise<unknown> {
@@ -213,15 +215,19 @@ const server = createServer(async (req, res) => {
         : sessionHeader;
 
       let transport: StreamableHTTPServerTransport;
-      if (sessionId && transports.has(sessionId)) {
-        transport = transports.get(sessionId)!;
+      if (sessionId && sessions.has(sessionId)) {
+        transport = sessions.get(sessionId)!.transport;
       } else if (!sessionId && req.method === "POST" && isInitializeRequest(body)) {
-        // New session: mint transport, connect a fresh McpServer copy,
-        // register on session-init.
+        // New session: mint a fresh McpServer + Transport pair so this
+        // client gets its own Protocol context. mcp.ts's
+        // createMcpInstance() registers tools/permission-handler and
+        // adds the new instance to activeInstances so broadcast
+        // notifications reach it.
+        const newMcp = createMcpInstance();
         const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
           onsessioninitialized: (sid: string) => {
-            transports.set(sid, newTransport);
+            sessions.set(sid, { transport: newTransport, mcp: newMcp });
             console.error(`[gateway] /mcp session opened: ${sid}`);
             // Tell the new client about an available update, if any.
             // Fire-and-forget — failures are logged in the helper and
@@ -230,17 +236,18 @@ const server = createServer(async (req, res) => {
           },
         });
         newTransport.onclose = () => {
-          // Remove stale entries when transport closes; client must
-          // re-initialize on next request.
-          for (const [sid, t] of transports) {
-            if (t === newTransport) {
-              transports.delete(sid);
+          // Remove stale entries + dispose mcp instance when transport
+          // closes; client must re-initialize on next request.
+          for (const [sid, s] of sessions) {
+            if (s.transport === newTransport) {
+              sessions.delete(sid);
+              disposeMcpInstance(s.mcp);
               console.error(`[gateway] /mcp session closed: ${sid}`);
               break;
             }
           }
         };
-        await mcp.connect(newTransport);
+        await newMcp.connect(newTransport);
         transport = newTransport;
       } else {
         // Missing or stale session ID and not an initialize — tell the

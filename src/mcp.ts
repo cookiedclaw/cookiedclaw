@@ -1,7 +1,9 @@
 /**
- * Singleton McpServer with cookiedclaw's channel + permission-relay
- * capabilities and base instructions. Tools are registered by tools.ts;
- * the permission-relay handler lives in permission-relay.ts.
+ * Per-session McpServer factory. Each MCP-over-HTTP session gets its own
+ * McpServer instance (the SDK's `Server` wraps one `Protocol` and binds
+ * to one Transport at a time — sharing a singleton across multiple
+ * sessions throws "Already connected to a transport"). Inbound Telegram
+ * notifications fan out to every active instance via `broadcastNotification`.
  *
  * Note: BOOTSTRAP / IDENTITY / USER / SOUL.md are NOT injected here.
  * They're surfaced via the repo-root CLAUDE.md, which CC auto-loads —
@@ -9,6 +11,8 @@
  * agent to actually act on first-run discovery.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { installPermissionHandler } from "./permission-relay.ts";
+import { registerTools } from "./tools.ts";
 
 const baseInstructions =
   "This is the cookiedclaw channel — primarily Telegram inbound, but the same channel will eventually carry other event types (cron, heartbeat, integration callbacks, …). Identify the event by `meta` keys: a Telegram message has `meta.chat_id` + `meta.sender`; reactions add `meta.is_reaction`; callbacks add `meta.is_callback`; future event types will add their own marker.\n\n" +
@@ -33,22 +37,64 @@ const baseInstructions =
   "  • `meta.is_callback=\"true\"` + `meta.callback_data` — the user tapped an inline keyboard button you previously attached. The `callback_data` is whatever string you passed to `reply`'s `buttons[].data`. Use this to drive multi-step flows (approve/deny, multi-choice menus, pagination).\n\n" +
   "Inline keyboard buttons: the `reply` tool accepts an optional `buttons` parameter — a 2D array of rows, each containing buttons with either `url` (open link) or `data` (callback to you). Use buttons when the response naturally branches: a yes/no question, a multi-choice prompt, or pagination of long results. Don't add buttons to every reply — they're noise when the conversation is freeform. When the user taps a `data` button, expect the next inbound to have `meta.is_callback=\"true\"` and the same `chat_id` / `message_id`.";
 
-export const mcp = new McpServer(
-  { name: "cookiedclaw", version: "0.1.0" },
-  {
-    capabilities: {
-      experimental: {
-        "claude/channel": {},
-        // Permission relay: when CC needs approval for a tool call (Bash,
-        // Write, Edit, etc.), CC posts the prompt here too. We forward it
-        // to the active chat with Allow/Deny inline buttons so the user
-        // can approve from their phone instead of having to be at the
-        // terminal. The local terminal dialog stays open in parallel —
-        // first answer wins. Only safe to declare because we gate inbound
-        // by sender (env allowlist + paired users).
-        "claude/channel/permission": {},
+/**
+ * Set of currently-connected McpServer instances. Populated when a new
+ * MCP session opens, removed when the transport closes. Used by inbound
+ * handlers (Telegram messages, permission verdicts) to fan out
+ * notifications to every connected client.
+ */
+export const activeInstances = new Set<McpServer>();
+
+export function createMcpInstance(): McpServer {
+  const mcp = new McpServer(
+    { name: "cookiedclaw", version: "0.1.3" },
+    {
+      capabilities: {
+        experimental: {
+          "claude/channel": {},
+          "claude/channel/permission": {},
+        },
       },
+      instructions: baseInstructions,
     },
-    instructions: baseInstructions,
-  },
-);
+  );
+  registerTools(mcp);
+  installPermissionHandler(mcp);
+  activeInstances.add(mcp);
+  return mcp;
+}
+
+export function disposeMcpInstance(mcp: McpServer): void {
+  activeInstances.delete(mcp);
+}
+
+/**
+ * Fan a notification out to every connected MCP session. Used for
+ * gateway-originating events (inbound Telegram, permission verdicts)
+ * that every connected adapter should see. Errors per instance are
+ * logged but don't stop the others — a flaky transport on one
+ * session shouldn't block the broadcast.
+ */
+export async function broadcastNotification(notif: {
+  method: string;
+  params?: Record<string, unknown>;
+}): Promise<void> {
+  if (activeInstances.size === 0) {
+    // No connected clients yet — drop. Telegram's `drop_pending_updates`
+    // means we won't replay anyway, and permission verdicts without an
+    // active session are meaningless.
+    return;
+  }
+  await Promise.allSettled(
+    Array.from(activeInstances).map(async (mcp) => {
+      try {
+        await mcp.server.notification(notif);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[mcp] notification fan-out failed for one instance: ${msg}`,
+        );
+      }
+    }),
+  );
+}

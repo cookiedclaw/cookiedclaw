@@ -1,8 +1,9 @@
 /**
- * Tool registrations on the McpServer: reply, react, pair, revoke_access,
- * list_access. Imported and called once from channel.ts; lives
- * here to keep the entry point lean.
+ * Tool registrations on a per-session McpServer instance: reply, react,
+ * pair, revoke_access, list_access. `registerTools(mcp)` is called from
+ * `createMcpInstance()` in mcp.ts each time a new MCP session opens.
  */
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InlineKeyboard } from "grammy";
 import { z } from "zod";
 import {
@@ -15,7 +16,8 @@ import { extractEmbeds, sendReply } from "./attachments.ts";
 import { bot } from "./bot.ts";
 import { allowAll, allowedUsers } from "./env.ts";
 import { sendFormatted } from "./format.ts";
-import { mcp } from "./mcp.ts";
+
+export function registerTools(mcp: McpServer): void {
 
 /**
  * Build an InlineKeyboard from the agent-supplied row/button matrix.
@@ -308,3 +310,5 @@ mcp.registerTool(
     return { content: [{ type: "text", text: lines.join("\n") }] };
   },
 );
+}  // end registerTools
+
