@@ -9,37 +9,52 @@
  *     coding-agent runtime that speaks MCP can plug in as a thin adapter
  *  4. Continues to host the localhost progress endpoint that runtime hooks
  *     POST to (Pre/PostToolUse → live editing in Telegram)
+ *  5. Supervises a child Claude Code process via the supervisor module —
+ *     spawn, restart-on-exit, watchdog on MCP disconnect, heartbeat-driven
+ *     stuck-transport detection. (Replaces the old separate
+ *     cookiedclaw.service unit.)
  *
  * Adapters (cookiedclaw-claude-code, future -codex / -cursor / -opencode)
  * connect to `http://127.0.0.1:${GATEWAY_PORT}/mcp` with a Bearer token.
- * The gateway's MCP server delivers inbound channel events to the adapter
- * (which forwards them into its host runtime as `<channel source="cookiedclaw">`
- * notifications), and the adapter calls back into the gateway's tools
- * (`reply` / `react` / `pair` / `revoke_access` / `list_access`) to talk
- * back to Telegram.
+ * Each session gets a freshly minted McpServer (the SDK's Protocol can
+ * only be connected to one transport at a time — singleton would throw
+ * "Already connected to a transport" on every reconnect). Tools and the
+ * permission-relay handler are registered onto each fresh server.
  *
- * Environment (read from process env, typically populated by a systemd
- * EnvironmentFile pointing at ~/.cookiedclaw/keys.env):
+ * Environment:
  *   TELEGRAM_BOT_TOKEN     — bot token from @BotFather
  *   TELEGRAM_ALLOWED_USERS — optional, comma-separated, "*" for any
  *   GATEWAY_PORT           — HTTP port to bind to (default 47390)
- *   GATEWAY_TOKEN          — required, Bearer token adapters present
+ *   COOKIEDCLAW_GATEWAY_TOKEN — required, Bearer token adapters present
  *   GATEWAY_HOST           — bind address (default 127.0.0.1; use
  *                            0.0.0.0 only behind a reverse proxy)
+ *   COOKIEDCLAW_LAUNCHER   — path to the launcher script the supervisor
+ *                            spawns (default ~/.cookiedclaw/launcher.sh).
+ *                            Set to "disabled" to run gateway-only and
+ *                            launch claude separately (dev mode).
  */
 import { createServer, type IncomingMessage } from "node:http";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { loadAccess } from "./access.ts";
 import { bot } from "./bot.ts";
 import { loadPending } from "./chat-state.ts";
 import { allowAll, allowedUsers, hasToken } from "./env.ts";
-import { mcp } from "./mcp.ts";
+import { liveServers } from "./live-servers.ts";
+import { createMcpServer } from "./mcp.ts";
+import { registerPermissionRelay } from "./permission-relay.ts";
 import { startProgressServer } from "./progress-server.ts";
+import {
+  notifySessionClosed,
+  notifySessionOpened,
+  runtimeStatus,
+  shutdownSupervisor,
+  startSupervisor,
+} from "./supervisor.ts";
+import { registerTools } from "./tools.ts";
 
-// Side-effect imports: each registers handlers / tools on `mcp` or `bot`.
-import "./tools.ts";
+// Side-effect imports — install Telegram bot.on / callbackQuery handlers.
 import "./inbound.ts";
-import "./permission-relay.ts";
 
 // Bumped per release. Surfaced via `/health` and used by the
 // auto-update check on session init to compare against
@@ -48,10 +63,6 @@ const SELF_VERSION = "0.1.2";
 
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 47390);
 const GATEWAY_HOST = process.env.GATEWAY_HOST ?? "127.0.0.1";
-// Brand-prefixed name; same one the adapter's .mcp.json and the setup
-// wizard write into keys.env. There's no unprefixed legacy form to
-// support — gateway has only ever existed with the prefix; the
-// inconsistency was a code typo, not historical baggage.
 const GATEWAY_TOKEN = process.env.COOKIEDCLAW_GATEWAY_TOKEN;
 
 if (!GATEWAY_TOKEN) {
@@ -70,20 +81,13 @@ await loadAccess();
 await loadPending();
 await startProgressServer();
 
-// One transport PER MCP session. The MCP SDK's StreamableHTTP transport
-// is single-session by design — once an `initialize` request lands and
-// a session ID is issued, that transport instance binds to the client
-// that opened it. A second client (or the same client reconnecting
-// after restart) hitting the same transport gets a 400 because the
-// transport is already in a non-initialize state.
-//
-// Pattern: keep a Map<sessionId, transport>. On a POST without a
-// session ID that contains an `initialize` request, mint a fresh
-// transport, connect a fresh McpServer to it, and remember the
-// transport under the issued session ID. Subsequent requests with
-// that session ID route to the same transport. Stale session IDs get
-// 404 so the client knows to re-initialize.
-const transports = new Map<string, StreamableHTTPServerTransport>();
+// Per-session bookkeeping. The transport AND its McpServer are minted
+// fresh on each `initialize` request. Reusing a single McpServer across
+// sessions throws "Already connected to a transport" on the second
+// session because the SDK's Protocol class is single-transport. See
+// live-servers.ts for the rationale + broadcast helper.
+type Session = { transport: StreamableHTTPServerTransport; server: McpServer };
+const sessions = new Map<string, Session>();
 
 function isInitializeRequest(body: unknown): boolean {
   if (!body || typeof body !== "object") return false;
@@ -135,11 +139,11 @@ async function checkForUpdate(): Promise<void> {
   }
 }
 
-async function notifyUpdateIfAvailable(): Promise<void> {
+async function notifyUpdateIfAvailable(server: McpServer): Promise<void> {
   await checkForUpdate();
   if (!updateCache?.available) return;
   try {
-    await mcp.server.notification({
+    await server.server.notification({
       method: "notifications/claude/channel",
       params: {
         content: `cookiedclaw gateway update available: v${SELF_VERSION} → v${updateCache.latest}. Run \`/cookiedclaw:setup\` to upgrade — wizard re-downloads the latest binary, idempotent on existing config.`,
@@ -181,8 +185,9 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 const server = createServer(async (req, res) => {
   const url = req.url ?? "/";
 
-  // Health check is unauthenticated so an outer supervisor can probe
-  // liveness without baking the token into its config.
+  // Health check is unauthenticated so an outer supervisor (and the
+  // daemon-status skill) can probe liveness without baking the token
+  // into its config.
   if (url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
@@ -190,6 +195,7 @@ const server = createServer(async (req, res) => {
         status: "ok",
         bot_polling: hasToken,
         version: SELF_VERSION,
+        runtime: runtimeStatus(),
       }),
     );
     return;
@@ -213,34 +219,44 @@ const server = createServer(async (req, res) => {
         : sessionHeader;
 
       let transport: StreamableHTTPServerTransport;
-      if (sessionId && transports.has(sessionId)) {
-        transport = transports.get(sessionId)!;
+      if (sessionId && sessions.has(sessionId)) {
+        transport = sessions.get(sessionId)!.transport;
       } else if (!sessionId && req.method === "POST" && isInitializeRequest(body)) {
-        // New session: mint transport, connect a fresh McpServer copy,
-        // register on session-init.
+        // New session: mint transport + a fresh McpServer (so the SDK's
+        // single-transport Protocol invariant holds), wire tools and
+        // the permission-relay request handler onto it, register on
+        // session-init.
+        const newServer = createMcpServer();
+        registerTools(newServer);
+        registerPermissionRelay(newServer);
+
         const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
           onsessioninitialized: (sid: string) => {
-            transports.set(sid, newTransport);
+            sessions.set(sid, { transport: newTransport, server: newServer });
+            liveServers.add(newServer);
+            notifySessionOpened();
             console.error(`[gateway] /mcp session opened: ${sid}`);
             // Tell the new client about an available update, if any.
             // Fire-and-forget — failures are logged in the helper and
             // shouldn't block the session from being usable.
-            void notifyUpdateIfAvailable();
+            void notifyUpdateIfAvailable(newServer);
           },
         });
         newTransport.onclose = () => {
           // Remove stale entries when transport closes; client must
           // re-initialize on next request.
-          for (const [sid, t] of transports) {
-            if (t === newTransport) {
-              transports.delete(sid);
+          for (const [sid, sess] of sessions) {
+            if (sess.transport === newTransport) {
+              sessions.delete(sid);
+              liveServers.delete(sess.server);
+              notifySessionClosed();
               console.error(`[gateway] /mcp session closed: ${sid}`);
               break;
             }
           }
         };
-        await mcp.connect(newTransport);
+        await newServer.connect(newTransport);
         transport = newTransport;
       } else {
         // Missing or stale session ID and not an initialize — tell the
@@ -306,3 +322,35 @@ if (hasToken) {
     "[gateway] no TELEGRAM_BOT_TOKEN — running in MCP-only mode (tools registered, no inbound messenger).",
   );
 }
+
+// Spawn + supervise the Claude Code child. Single supervision tree
+// replaces the old gateway.service + cookiedclaw.service split.
+startSupervisor();
+
+// Clean shutdown: kill the child, stop bot polling, close the HTTP
+// listener. systemd sends SIGTERM on `systemctl stop`; honoring it
+// avoids leaving an orphaned `claude` (in tmux) behind that the next
+// daemon start would 409 against.
+let shuttingDown = false;
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`[gateway] received ${signal}, shutting down`);
+  try {
+    await shutdownSupervisor();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[gateway] supervisor shutdown error: ${msg}`);
+  }
+  try {
+    await bot.stop();
+  } catch {
+    // best-effort
+  }
+  server.close(() => process.exit(0));
+  // Hard cap: if HTTP server has lingering connections, exit anyway.
+  setTimeout(() => process.exit(0), 5_000).unref();
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
