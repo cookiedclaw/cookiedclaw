@@ -216,8 +216,26 @@ const server = createServer(async (req, res) => {
       if (sessionId && transports.has(sessionId)) {
         transport = transports.get(sessionId)!;
       } else if (!sessionId && req.method === "POST" && isInitializeRequest(body)) {
-        // New session: mint transport, connect a fresh McpServer copy,
-        // register on session-init.
+        // McpServer (the singleton in mcp.ts) wraps one Protocol that
+        // can only be connected to one Transport at a time. The SDK
+        // throws "Already connected to a transport" if we try to
+        // mcp.connect() a second one. Until tools/inbound are
+        // refactored into a per-session McpServer factory, enforce
+        // single-active-client: drop any existing transports before
+        // minting the new one. Practical effect: a fresh CC restart
+        // (or ad-hoc TUI relaunch) takes over from whatever was
+        // connected before; the old session's MCP goes silent but
+        // the agent on that side is gone anyway.
+        for (const [sid, t] of transports) {
+          try {
+            await t.close();
+          } catch {
+            // best-effort
+          }
+          transports.delete(sid);
+          console.error(`[gateway] /mcp session displaced: ${sid}`);
+        }
+
         const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
           onsessioninitialized: (sid: string) => {
