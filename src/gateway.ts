@@ -59,7 +59,7 @@ import "./inbound.ts";
 // Bumped per release. Surfaced via `/health` and used by the
 // auto-update check on session init to compare against
 // github.com/cookiedclaw/cookiedclaw releases/latest.
-const SELF_VERSION = "0.2.0";
+const SELF_VERSION = "0.2.1";
 
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT ?? 47390);
 const GATEWAY_HOST = process.env.GATEWAY_HOST ?? "127.0.0.1";
