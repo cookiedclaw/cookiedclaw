@@ -48,8 +48,19 @@ const LAUNCHER = process.env.COOKIEDCLAW_LAUNCHER ?? `${HOME}/.cookiedclaw/launc
 // running but never opens a session" case (which is almost always a
 // config bug the user should investigate, not race-restart through).
 const BOOT_GRACE_MS = (Number(process.env.COOKIEDCLAW_BOOT_GRACE_S) || 600) * 1000;
+// Disconnect watchdog: how long with `liveServers.size === 0` (after the
+// first session opened) before we restart the child. DISABLED by default
+// (0 = off) because Claude Code's MCP client already reconnects on its
+// own — racing CC's retry with our own restart kills work needlessly.
+// The heartbeat (HEARTBEAT_INTERVAL_MS) handles stuck-but-not-closed
+// transports; once it force-closes a dead session, CC's native reconnect
+// re-opens one. Set this to a non-zero value (e.g. 1800 = 30min) only if
+// you've seen claude get permanently wedged with no MCP for long stretches
+// and want a long-tail safety net. The watchdog is NOT a substitute for
+// CC's reconnect; it's a fallback for bug-class scenarios where reconnect
+// loop genuinely stops.
 const DISCONNECT_TIMEOUT_MS =
-  (Number(process.env.COOKIEDCLAW_DISCONNECT_TIMEOUT_S) || 60) * 1000;
+  (Number(process.env.COOKIEDCLAW_DISCONNECT_TIMEOUT_S) || 0) * 1000;
 const HEARTBEAT_INTERVAL_MS =
   (Number(process.env.COOKIEDCLAW_HEARTBEAT_INTERVAL_S) || 30) * 1000;
 const HEARTBEAT_TIMEOUT_MS =
@@ -204,10 +215,17 @@ export function notifySessionOpened(): void {
 }
 
 /**
- * gateway.ts calls this on every transport onclose. If no live sessions
- * remain and we're past boot grace, start the disconnect countdown.
+ * gateway.ts calls this on every transport onclose. Trust CC's native
+ * MCP reconnect by default — DISCONNECT_TIMEOUT_MS=0 means we don't
+ * race CC's retry with our own restart. The heartbeat already cleans
+ * up dead sessions; CC reopens them on its own.
+ *
+ * If the user opted into a watchdog (set COOKIEDCLAW_DISCONNECT_TIMEOUT_S
+ * to a non-zero value), we start a countdown here when liveServers
+ * empties post-boot. A reconnect cancels it; expiry restarts the child.
  */
 export function notifySessionClosed(): void {
+  if (DISCONNECT_TIMEOUT_MS <= 0) return; // watchdog disabled
   if (liveServers.size > 0) return;
   if (state.kind !== "running") return;
   if (disconnectTimer) return;
