@@ -18,7 +18,6 @@ import {
   addPending,
   chats,
   setActiveChatId,
-  startTyping,
   stopTyping,
 } from "./chat-state.ts";
 import { sendFormatted, senderDisplayName } from "./format.ts";
@@ -49,8 +48,12 @@ function formatSkillsListMessage(): string {
 /**
  * Forward an inbound user message into CC's session as a `<channel>`
  * notification. Sets active chat (for permission-relay routing), adds
- * to pendingChats (for progress fan-out), resets this chat's tool log,
- * and starts the typing indicator.
+ * to pendingChats (for progress fan-out), resets this chat's tool log.
+ *
+ * Typing indicator is NOT started here — it kicks on from the first
+ * `PreToolUse` hook event of the turn (see progress.ts), so users only
+ * see "typing…" once the agent actually starts working, not while it's
+ * still parsing the channel notification.
  *
  * `messageId` is surfaced to CC via meta so the `react` tool can target
  * it (you can't react to a message without knowing its id).
@@ -82,7 +85,6 @@ async function forwardToCC(
   // New user message = clear any /stop flag from a prior turn so the
   // PreToolUse hook stops blocking non-reply tools.
   unlink(stopFlag).catch(() => {});
-  startTyping(chatId);
   // Native-feel feedback: schedule a "🤔 Thinking…" progress message
   // immediately. If the agent calls its first tool within the 200ms
   // debounce window, the same push picks up the tool-event state. If

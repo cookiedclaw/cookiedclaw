@@ -9,6 +9,7 @@ import {
   chats,
   pendingChats,
   queueEdit,
+  startTyping,
   stopTyping,
   type ChatState,
   type ToolEvent,
@@ -348,6 +349,11 @@ export async function handleProgress(p: ProgressPayload): Promise<void> {
   for (const chatId of pendingChats) {
     const state = chats.get(chatId) ?? { events: [] };
     chats.set(chatId, state);
+    // Tool activity = canonical "agent is working" signal. First call
+    // mints the typing interval; subsequent calls only refresh its
+    // failsafe so a long turn doesn't expire mid-flight. Stop hook
+    // tears it down via stopTyping.
+    startTyping(chatId);
     applyEvent(state, p);
     void queueEdit(chatId, () => pushProgress(chatId));
   }

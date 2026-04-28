@@ -183,22 +183,49 @@ export function queueEdit<T>(
 // Typing indicator (per-chat lifetime, refreshed every 4.5s)
 // -----------------------------------------------------------------------------
 
+/** Wall-clock window with no PreToolUse / PostToolUse activity after which
+ *  we assume the agent died or Stop missed and self-clear typing. Kept
+ *  tight (90s) because the Stop hook is normally what stops typing —
+ *  this is the safety net, not the primary mechanism. Each tool event
+ *  resets it, so long turns don't expire. */
+const TYPING_FAILSAFE_MS = 90_000;
+
 /**
+ * Start (or refresh) the Telegram "typing…" indicator for a chat.
+ *
  * Telegram's `sendChatAction("typing")` signal lasts ~5 seconds, so we
- * refresh it every 4.5s while CC is working. Started on inbound and
- * cleared by `reply`/`react`/`/stop` (or by a 5-minute failsafe if
- * none of those fire).
+ * refresh it every 4.5s while CC is working. The canonical "agent is
+ * actively working" trigger is a `PreToolUse` hook event — see
+ * https://code.claude.com/docs/en/hooks. `progress.ts` calls this on
+ * every `pre` event for each pending chat:
+ *   - first call mints the interval + failsafe
+ *   - subsequent calls only reset the failsafe (long turns don't expire)
+ *
+ * Cleared authoritatively by the `Stop` hook via `stopTyping`. The
+ * failsafe is the safety net for cases where Stop doesn't fire
+ * (StopFailure on API error, session ending mid-turn, hook subprocess
+ * bug, etc. — see hooks docs for the full edge-case list).
  */
 export function startTyping(chatId: string): void {
   const state = chats.get(chatId);
-  if (!state || state.typing) return;
-  const ping = () => {
-    bot.api.sendChatAction(Number(chatId), "typing").catch(() => {});
-  };
-  ping();
-  const interval = setInterval(ping, 4500);
-  const failsafe = setTimeout(() => stopTyping(chatId), 5 * 60 * 1000);
-  state.typing = { interval, failsafe };
+  if (!state) return;
+  if (!state.typing) {
+    const ping = () => {
+      bot.api.sendChatAction(Number(chatId), "typing").catch(() => {});
+    };
+    ping();
+    const interval = setInterval(ping, 4500);
+    const failsafe = setTimeout(() => stopTyping(chatId), TYPING_FAILSAFE_MS);
+    state.typing = { interval, failsafe };
+    return;
+  }
+  // Refresh the failsafe — fresh tool activity proves the agent is
+  // alive, so push the watchdog back out by another window.
+  clearTimeout(state.typing.failsafe);
+  state.typing.failsafe = setTimeout(
+    () => stopTyping(chatId),
+    TYPING_FAILSAFE_MS,
+  );
 }
 
 export function stopTyping(chatId: string): void {
