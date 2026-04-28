@@ -38,7 +38,16 @@ import { liveServers } from "./live-servers.ts";
 const HOME = homedir();
 
 const LAUNCHER = process.env.COOKIEDCLAW_LAUNCHER ?? `${HOME}/.cookiedclaw/launcher.sh`;
-const BOOT_GRACE_MS = (Number(process.env.COOKIEDCLAW_BOOT_GRACE_S) || 90) * 1000;
+// Boot grace = how long after spawn we wait for claude to open its first
+// MCP session before declaring boot failed and restarting. On a fast
+// machine claude boots in 5-15s; on a Pi with `--continue` (loading a
+// long transcript from disk) + MCP plugin init it can take 2-3 minutes,
+// occasionally more. The default is generous on purpose — false-positive
+// restart loops kill in-flight tool calls from the user's perspective,
+// while a too-long grace just delays recovery in the rare "claude is
+// running but never opens a session" case (which is almost always a
+// config bug the user should investigate, not race-restart through).
+const BOOT_GRACE_MS = (Number(process.env.COOKIEDCLAW_BOOT_GRACE_S) || 600) * 1000;
 const DISCONNECT_TIMEOUT_MS =
   (Number(process.env.COOKIEDCLAW_DISCONNECT_TIMEOUT_S) || 60) * 1000;
 const HEARTBEAT_INTERVAL_MS =
