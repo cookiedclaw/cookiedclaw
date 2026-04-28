@@ -1,7 +1,13 @@
 /**
- * Singleton McpServer with cookiedclaw's channel + permission-relay
- * capabilities and base instructions. Tools are registered by tools.ts;
- * the permission-relay handler lives in permission-relay.ts.
+ * McpServer factory. Each /mcp session gets a fresh server because the
+ * SDK's underlying `Server`/`Protocol` class can only be `connect`ed to
+ * one transport at a time — reusing a singleton across sessions throws
+ * "Already connected to a transport. Call close() before connecting to
+ * a new transport, or use a separate Protocol instance per connection."
+ *
+ * Tools (tools.ts) and the permission-relay handler (permission-relay.ts)
+ * are registered onto each fresh server via their `register*` exports;
+ * gateway.ts wires it all together on session-init.
  *
  * Note: BOOTSTRAP / IDENTITY / USER / SOUL.md are NOT injected here.
  * They're surfaced via the repo-root CLAUDE.md, which CC auto-loads —
@@ -33,22 +39,24 @@ const baseInstructions =
   "  • `meta.is_callback=\"true\"` + `meta.callback_data` — the user tapped an inline keyboard button you previously attached. The `callback_data` is whatever string you passed to `reply`'s `buttons[].data`. Use this to drive multi-step flows (approve/deny, multi-choice menus, pagination).\n\n" +
   "Inline keyboard buttons: the `reply` tool accepts an optional `buttons` parameter — a 2D array of rows, each containing buttons with either `url` (open link) or `data` (callback to you). Use buttons when the response naturally branches: a yes/no question, a multi-choice prompt, or pagination of long results. Don't add buttons to every reply — they're noise when the conversation is freeform. When the user taps a `data` button, expect the next inbound to have `meta.is_callback=\"true\"` and the same `chat_id` / `message_id`.";
 
-export const mcp = new McpServer(
-  { name: "cookiedclaw", version: "0.1.0" },
-  {
-    capabilities: {
-      experimental: {
-        "claude/channel": {},
-        // Permission relay: when CC needs approval for a tool call (Bash,
-        // Write, Edit, etc.), CC posts the prompt here too. We forward it
-        // to the active chat with Allow/Deny inline buttons so the user
-        // can approve from their phone instead of having to be at the
-        // terminal. The local terminal dialog stays open in parallel —
-        // first answer wins. Only safe to declare because we gate inbound
-        // by sender (env allowlist + paired users).
-        "claude/channel/permission": {},
+export function createMcpServer(): McpServer {
+  return new McpServer(
+    { name: "cookiedclaw", version: "0.1.0" },
+    {
+      capabilities: {
+        experimental: {
+          "claude/channel": {},
+          // Permission relay: when CC needs approval for a tool call (Bash,
+          // Write, Edit, etc.), CC posts the prompt here too. We forward it
+          // to the active chat with Allow/Deny inline buttons so the user
+          // can approve from their phone instead of having to be at the
+          // terminal. The local terminal dialog stays open in parallel —
+          // first answer wins. Only safe to declare because we gate inbound
+          // by sender (env allowlist + paired users).
+          "claude/channel/permission": {},
+        },
       },
+      instructions: baseInstructions,
     },
-    instructions: baseInstructions,
-  },
-);
+  );
+}

@@ -1,17 +1,25 @@
 /**
  * Permission relay: forward CC's Allow/Deny prompts (notifications/
- * claude/channel/permission_request) to Telegram with inline buttons.
+ * claude/channel/permission_request) to Telegram with inline buttons,
+ * then forward the user's verdict back as a notification.
  *
- * Importing this module installs the notification handler + the
- * callbackQuery handler as side effects.
+ * Two halves:
+ *   - `registerPermissionRelay(mcp)` — installs the request-handler on a
+ *     given (per-session) McpServer. Called from gateway.ts on each new
+ *     session.
+ *   - The bot.callbackQuery handler (registered as a side effect at
+ *     module import time) is a singleton — there's only one Telegram
+ *     bot — and broadcasts the verdict over `liveServers` so whichever
+ *     adapter is currently connected receives it.
  */
 import { InlineKeyboard } from "grammy";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { isAllowed } from "./access.ts";
 import { bot } from "./bot.ts";
 import { activeChatId } from "./chat-state.ts";
 import { senderDisplayName, toTelegramMd } from "./format.ts";
-import { mcp } from "./mcp.ts";
+import { broadcastNotification } from "./live-servers.ts";
 import { dlog } from "./paths.ts";
 
 const PermissionRequestSchema = z.object({
@@ -29,6 +37,10 @@ const PermissionRequestSchema = z.object({
  * we can edit it after the verdict, removing buttons and showing the
  * outcome). Entries leak across long sessions but each is tiny; cleared
  * on verdict or on the rare "tap stale button after CC moved on" path.
+ *
+ * Shared across sessions: a request opened by one session may technically
+ * be acked while a different session is current, but in practice there's
+ * only ever one CC adapter at a time so this is moot.
  */
 const pendingPermissions = new Map<
   string,
@@ -50,39 +62,45 @@ function formatPermissionPrompt(p: {
   return `🔒 Claude wants to run **${p.tool_name}**\n\n${p.description}${preview}`;
 }
 
-mcp.server.setNotificationHandler(
-  PermissionRequestSchema,
-  async ({ params }) => {
-    if (!activeChatId) {
-      dlog(
-        `permission request with no active chat (tool=${params.tool_name}, id=${params.request_id})`,
-      );
-      return;
-    }
-    const chatId = Number(activeChatId);
-    const kb = new InlineKeyboard()
-      .text("✓ Allow", `perm_allow:${params.request_id}`)
-      .text("✗ Deny", `perm_deny:${params.request_id}`);
-    try {
-      const sent = await bot.api.sendMessage(
-        chatId,
-        toTelegramMd(formatPermissionPrompt(params)),
-        { parse_mode: "MarkdownV2", reply_markup: kb },
-      );
-      pendingPermissions.set(params.request_id, {
-        chatId,
-        messageId: sent.message_id,
-      });
-      dlog(
-        `permission prompt sent: id=${params.request_id} tool=${params.tool_name}`,
-      );
-    } catch (err) {
-      console.error(
-        `[telegram] permission relay send failed: ${err instanceof Error ? err.message : err}`,
-      );
-    }
-  },
-);
+/**
+ * Wire the permission_request notification handler onto a freshly
+ * created per-session McpServer. Called from gateway.ts on session-init.
+ */
+export function registerPermissionRelay(mcp: McpServer): void {
+  mcp.server.setNotificationHandler(
+    PermissionRequestSchema,
+    async ({ params }) => {
+      if (!activeChatId) {
+        dlog(
+          `permission request with no active chat (tool=${params.tool_name}, id=${params.request_id})`,
+        );
+        return;
+      }
+      const chatId = Number(activeChatId);
+      const kb = new InlineKeyboard()
+        .text("✓ Allow", `perm_allow:${params.request_id}`)
+        .text("✗ Deny", `perm_deny:${params.request_id}`);
+      try {
+        const sent = await bot.api.sendMessage(
+          chatId,
+          toTelegramMd(formatPermissionPrompt(params)),
+          { parse_mode: "MarkdownV2", reply_markup: kb },
+        );
+        pendingPermissions.set(params.request_id, {
+          chatId,
+          messageId: sent.message_id,
+        });
+        dlog(
+          `permission prompt sent: id=${params.request_id} tool=${params.tool_name}`,
+        );
+      } catch (err) {
+        console.error(
+          `[telegram] permission relay send failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    },
+  );
+}
 
 bot.callbackQuery(/^perm_(allow|deny):([a-km-z]{5})$/, async (ctx) => {
   // Gate by allowlist — anyone who can tap a button in our chat could
@@ -98,16 +116,10 @@ bot.callbackQuery(/^perm_(allow|deny):([a-km-z]{5})$/, async (ctx) => {
   const verdict = ctx.match[1] as "allow" | "deny";
   const requestId = ctx.match[2]!;
 
-  try {
-    await mcp.server.notification({
-      method: "notifications/claude/channel/permission",
-      params: { request_id: requestId, behavior: verdict },
-    });
-  } catch (err) {
-    console.error(
-      `[telegram] permission verdict notification failed: ${err instanceof Error ? err.message : err}`,
-    );
-  }
+  await broadcastNotification({
+    method: "notifications/claude/channel/permission",
+    params: { request_id: requestId, behavior: verdict },
+  });
 
   // Drop buttons and show the outcome inline so the chat is self-explanatory.
   const senderName = senderDisplayName(ctx.from);

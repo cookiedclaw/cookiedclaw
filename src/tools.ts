@@ -1,8 +1,10 @@
 /**
- * Tool registrations on the McpServer: reply, react, pair, revoke_access,
- * list_access. Imported and called once from channel.ts; lives
- * here to keep the entry point lean.
+ * Tool registrations on a per-session McpServer: reply, react, pair,
+ * revoke_access, list_access, restart_runtime. `registerTools` is
+ * called by gateway.ts once per session-init against a freshly minted
+ * server (see live-servers.ts for why per-session).
  */
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InlineKeyboard } from "grammy";
 import { z } from "zod";
 import {
@@ -15,7 +17,7 @@ import { extractEmbeds, sendReply } from "./attachments.ts";
 import { bot } from "./bot.ts";
 import { allowAll, allowedUsers } from "./env.ts";
 import { sendFormatted } from "./format.ts";
-import { mcp } from "./mcp.ts";
+import { requestRuntimeRestart, supervisorEnabled } from "./supervisor.ts";
 
 /**
  * Build an InlineKeyboard from the agent-supplied row/button matrix.
@@ -46,6 +48,12 @@ function buildInlineKeyboard(
   }
   return kb;
 }
+
+/**
+ * Register all cookiedclaw MCP tools on the given server. Called once
+ * per session by gateway.ts.
+ */
+export function registerTools(mcp: McpServer): void {
 
 // -----------------------------------------------------------------------------
 // reply
@@ -308,3 +316,56 @@ mcp.registerTool(
     return { content: [{ type: "text", text: lines.join("\n") }] };
   },
 );
+
+// -----------------------------------------------------------------------------
+// restart_runtime
+// -----------------------------------------------------------------------------
+//
+// Asks the gateway's supervisor to restart the child Claude Code process —
+// equivalent of `systemctl --user restart cookiedclaw` in the old two-unit
+// world. Used after installing a new skill/plugin/MCP server (only loaded
+// at CC startup) or when the agent itself decides to be reborn. The tool
+// returns immediately and the actual restart fires after a short delay so
+// the response can flush back to the client; the calling session dies in
+// the process.
+
+mcp.registerTool(
+  "restart_runtime",
+  {
+    description:
+      "Restart the Claude Code runtime supervised by the gateway. Use after installing a new skill / plugin / MCP server (anything only discovered at startup), or when the agent decides it needs a clean reload. The current session terminates as part of the restart; the new CC reconnects within a few seconds.",
+    inputSchema: {
+      reason: z
+        .string()
+        .max(200)
+        .optional()
+        .describe(
+          "Optional human-readable reason for the restart (logged to the gateway journal).",
+        ),
+    },
+  },
+  async ({ reason }) => {
+    if (!supervisorEnabled()) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Supervisor is disabled (COOKIEDCLAW_LAUNCHER=disabled or no launcher configured). Restart Claude Code manually.",
+          },
+        ],
+        isError: true,
+      };
+    }
+    requestRuntimeRestart(reason);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Restart scheduled${reason ? ` (${reason})` : ""}. CC will go down in ~2s; reconnect and continue your conversation when it comes back up.`,
+        },
+      ],
+    };
+  },
+);
+
+} // end registerTools
