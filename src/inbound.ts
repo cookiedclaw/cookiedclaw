@@ -69,15 +69,27 @@ async function forwardToCC(
 ): Promise<void> {
   setActiveChatId(chatId);
   addPending(chatId);
-  // Reset this chat's tool log — it's the start of their turn. Other
-  // pending chats keep whatever they had. Mutate the existing state
-  // object instead of replacing it: replacing would orphan a typing
-  // interval started by an earlier forwardToCC, leaking a setInterval
-  // that pings "typing..." forever.
+  // Determine whether this chat already has a tool call in flight. If
+  // it does, the user is spamming on top of a working agent — we MUST
+  // NOT wipe the events list / progress message: doing so would orphan
+  // the in-flight tool's `pre` event so the matching `post` lands
+  // without a partner, the live progress message gets detached from
+  // its id and replaced by a fresh "🤔 Thinking…" bubble, and the
+  // user sees their tool-call log "fall off" into limbo. Instead we
+  // keep the existing log intact and ack the new message with a 👀
+  // reaction so the user knows it landed and is queued behind the
+  // current turn.
   let state = chats.get(chatId);
+  const inFlight = state?.events.some((e) => e.status === "running") ?? false;
   if (state) {
-    state.events = [];
-    state.progressMessageId = undefined;
+    if (!inFlight) {
+      state.events = [];
+      state.progressMessageId = undefined;
+    }
+    // else: leave events + progressMessageId alone; pending tool's
+    // post will still match its pre, the live progress bubble keeps
+    // updating, and the agent will see this new channel notification
+    // after its current turn completes.
   } else {
     state = { events: [] };
     chats.set(chatId, state);
@@ -85,13 +97,31 @@ async function forwardToCC(
   // New user message = clear any /stop flag from a prior turn so the
   // PreToolUse hook stops blocking non-reply tools.
   unlink(stopFlag).catch(() => {});
-  // Native-feel feedback: schedule a "🤔 Thinking…" progress message
-  // immediately. If the agent calls its first tool within the 200ms
-  // debounce window, the same push picks up the tool-event state. If
-  // not (e.g. agent thinks for several seconds before any tool), the
-  // user sees a Thinking bubble within 200ms instead of staring at the
-  // typing indicator alone.
-  schedulePush(chatId);
+  if (inFlight) {
+    // Subtle ack: react to the user's own message rather than spawn a
+    // competing chat bubble. 👀 is in Telegram's free reaction set so
+    // it works without paid reactions enabled on the chat.
+    bot.api
+      .setMessageReaction(Number(chatId), messageId, [
+        { type: "emoji", emoji: "👀" },
+      ])
+      .catch((err: unknown) => {
+        // Reactions can fail (chat doesn't allow reactions, message
+        // too old, rate limit) — degrade silently, the message has
+        // still been forwarded to CC below.
+        dlog(
+          `queued-ack reaction failed: ${err instanceof Error ? err.message : err}`,
+        );
+      });
+  } else {
+    // Idle (or fresh chat): schedule a "🤔 Thinking…" progress message
+    // immediately. If the agent calls its first tool within the 200ms
+    // debounce window, the same push picks up the tool-event state.
+    // If not (e.g. agent thinks for several seconds before any tool),
+    // the user sees a Thinking bubble within 200ms instead of staring
+    // at the typing indicator alone.
+    schedulePush(chatId);
+  }
   dlog(
     `inbound: chat=${chatId} sender=${senderId} msg=${messageId}${attachmentPath ? ` attachment=${attachmentPath}` : ""}`,
   );
