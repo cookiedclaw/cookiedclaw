@@ -338,23 +338,26 @@ export async function handleProgress(p: ProgressPayload): Promise<void> {
   dlog(
     `progress in: phase=${p.phase} tool=${p.tool_name} id=${p.tool_use_id} pending=[${[...pendingChats].join(",") || "none"}]`,
   );
-  if (isReplyTool(p.tool_name)) {
-    dlog(`  -> skipped (reply tool)`);
-    return;
-  }
   if (pendingChats.size === 0) {
     dlog(`  -> skipped (no pending chats)`);
     return;
   }
+  // Tool activity (any tool, including `reply`) = canonical "agent is
+  // working" signal — start typing for every pending chat BEFORE the
+  // reply-skip below. Otherwise a turn whose only tool is `reply`
+  // (short answer, no Bash/Read/etc.) shows no typing indicator at all.
+  // First call mints the interval; subsequent calls refresh the
+  // failsafe so long turns don't expire. Stop hook tears it down.
+  const isReply = isReplyTool(p.tool_name);
   for (const chatId of pendingChats) {
     const state = chats.get(chatId) ?? { events: [] };
     chats.set(chatId, state);
-    // Tool activity = canonical "agent is working" signal. First call
-    // mints the typing interval; subsequent calls only refresh its
-    // failsafe so a long turn doesn't expire mid-flight. Stop hook
-    // tears it down via stopTyping.
     startTyping(chatId);
+    if (isReply) continue; // typing only — reply isn't progress
     applyEvent(state, p);
     void queueEdit(chatId, () => pushProgress(chatId));
+  }
+  if (isReply) {
+    dlog(`  -> reply tool: typing refreshed, no progress entry added`);
   }
 }
