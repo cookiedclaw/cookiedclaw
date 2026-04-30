@@ -24,7 +24,12 @@ A standalone bun process that owns:
 - **Tool surface** — `reply`, `react`, `pair`, `revoke_access`, `list_access` exposed via MCP. Adapters call them to talk back to messengers.
 - **Localhost progress endpoint** — runtime hooks (CC's Pre/PostToolUse, Codex's equivalents) POST tool events here to drive the live progress message in chat.
 
-Adapters (currently [cookiedclaw-claude-code](https://github.com/cookiedclaw/cookiedclaw-claude-code), planned: `-codex`, `-cursor`, `-opencode`) are config-only plugins for their respective runtimes that connect to this gateway via MCP-over-HTTP.
+Adapters connect to this gateway via MCP-over-HTTP. Currently shipping:
+
+- [cookiedclaw-claude-code](https://github.com/cookiedclaw/cookiedclaw-claude-code) — the original Claude Code adapter
+- [cookiedclaw-cursor](https://github.com/cookiedclaw/cookiedclaw-cursor) — Cursor IDE adapter (uses the new HTTP-mediated permission relay below)
+
+Planned: `-codex`, `-opencode`.
 
 ## Architecture (post-split, target shape)
 
@@ -92,14 +97,15 @@ Intel-mac (`darwin-x64`) is intentionally not built — GitHub Actions removed t
 ## Roadmap
 
 - **Adapter→gateway skill catalog push** — runtime adapters tell the gateway what skills are available so `/skills` can render the unified menu (today the gateway shows a placeholder).
-- **Permission-relay routing** — adapter forwards CC permission prompts via gateway HTTP API; gateway dispatches `[✓ Allow] / [✗ Deny]` inline buttons.
+- **HTTP-mediated permission relay** — _shipped_: `POST /permission-request` now accepts adapter-initiated verdict requests (used by `cookiedclaw-cursor`, which can't speak the MCP `permission_request` notification CC uses). Gateway dispatches `[✓ Allow] [✗ Deny] [❔ Ask Locally]` inline buttons, awaits verdict, returns to caller.
 - **Multi-adapter coordination** — gateway holds a presence map of connected adapters and routes inbound DMs to whichever runtime owns the chat (per-workspace agent identity).
 - **Multi-messenger transport plugins** — Discord, Slack, iMessage, Signal, email each as a transport module under the same paired-user/state layer.
 - **GitHub Actions release workflow** — `build:all` on tag, attach binaries to release.
 
 ## Related
 
-- **[cookiedclaw-claude-code](https://github.com/cookiedclaw/cookiedclaw-claude-code)** — the Claude Code adapter (currently still all-in-one; will become a thin gateway client)
+- **[cookiedclaw-claude-code](https://github.com/cookiedclaw/cookiedclaw-claude-code)** — the Claude Code adapter
+- **[cookiedclaw-cursor](https://github.com/cookiedclaw/cookiedclaw-cursor)** — the Cursor IDE adapter
 - **[cookiedclaw/landing](https://github.com/cookiedclaw/landing)** — pitch page
 - **[cookiedclaw/.github](https://github.com/cookiedclaw/.github)** — org profile
 

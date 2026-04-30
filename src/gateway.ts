@@ -42,6 +42,7 @@ import { loadPending } from "./chat-state.ts";
 import { allowAll, allowedUsers, hasToken } from "./env.ts";
 import { liveServers } from "./live-servers.ts";
 import { createMcpServer } from "./mcp.ts";
+import { handlePermissionRequest } from "./permission-http.ts";
 import { registerPermissionRelay } from "./permission-relay.ts";
 import { startProgressServer } from "./progress-server.ts";
 import {
@@ -207,6 +208,27 @@ const server = createServer(async (req, res) => {
   if (auth !== `Bearer ${GATEWAY_TOKEN}`) {
     res.writeHead(401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "unauthorized", hint: "set Authorization: Bearer <GATEWAY_TOKEN>" }));
+    return;
+  }
+
+  // HTTP-mediated permission relay used by adapters that don't speak
+  // the MCP `permission_request` notification (notably cookiedclaw-cursor).
+  // The handler awaits a Telegram verdict (or its internal timeout) before
+  // returning, which is fine — node:http will keep the connection open.
+  if (url === "/permission-request" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const result = await handlePermissionRequest(body);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[gateway] /permission-request error: ${msg}`);
+      if (!res.writableEnded) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ verdict: "deny", agent_message: msg }));
+      }
+    }
     return;
   }
 
