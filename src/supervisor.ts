@@ -33,6 +33,7 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { homedir } from "node:os";
+import { pruneStaleRunningEvents } from "./chat-state.ts";
 import { liveServers } from "./live-servers.ts";
 
 const HOME = homedir();
@@ -198,7 +199,10 @@ export function requestRuntimeRestart(reason?: string): void {
 /**
  * gateway.ts calls this on every onsessioninitialized. Cancels the
  * disconnect timer (we're connected again) and the boot-grace timer
- * (claude phoned home, we're done waiting).
+ * (claude phoned home, we're done waiting), then drops any "running"
+ * tool events from chat-state — those came from the prior MCP session
+ * and their PostToolUse will never land here (see
+ * pruneStaleRunningEvents in chat-state.ts for the full rationale).
  */
 export function notifySessionOpened(): void {
   if (bootGraceTimer) {
@@ -212,6 +216,7 @@ export function notifySessionOpened(): void {
   if (state.kind === "starting") {
     state = { kind: "running", child: state.child, startedAt: state.startedAt };
   }
+  pruneStaleRunningEvents();
 }
 
 /**

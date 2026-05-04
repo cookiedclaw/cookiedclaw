@@ -79,6 +79,43 @@ export function removePending(chatId: string): void {
   if (pendingChats.delete(chatId)) schedulePersist();
 }
 
+/**
+ * Drop "running" tool events from every chat's state, plus the
+ * progress message id those events were rendering into. Called by the
+ * supervisor on every MCP session-init.
+ *
+ * Why this matters: a `running` event is created by `applyEvent` on
+ * PreToolUse and cleared on PostToolUse. If claude dies between pre
+ * and post (heartbeat force-closed the transport mid-tool, supervisor
+ * killed the child, gateway briefly unreachable from the hook script,
+ * or the hook subprocess errored on POST), the post never lands and
+ * the `running` event sits in the events list forever. The next user
+ * inbound then trips `state.events.some(running)` in forwardToCC,
+ * which routes through the queued-ack branch (👀 reaction, no "🤔
+ * Thinking…", no state reset) — leaving the user with no progress UI
+ * for the new turn and a progress-message id pointing at a Telegram
+ * message that may already be too old to edit.
+ *
+ * Pruning on every session-open is a coarse cleanup but matches the
+ * semantic: a fresh MCP session means whatever was "in flight" before
+ * is unreachable. If a tool's PostToolUse DOES still arrive (tool
+ * actually completed and the hook reaches us), `applyEvent` falls
+ * through to the no-matching-pre branch and pushes a standalone
+ * "done" entry — the only loss is the `inputSummary` from the pre
+ * event. Acceptable trade-off versus a stuck UX.
+ */
+export function pruneStaleRunningEvents(): void {
+  for (const [chatId, state] of chats) {
+    if (!state.events.some((e) => e.status === "running")) continue;
+    const before = state.events.length;
+    state.events = state.events.filter((e) => e.status !== "running");
+    state.progressMessageId = undefined;
+    dlog(
+      `session-open: pruned ${before - state.events.length} stale running event(s) for chat=${chatId}`,
+    );
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Disk persistence (pendingChats + activeChatId)
 // -----------------------------------------------------------------------------
