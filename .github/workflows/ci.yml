@@ -38,3 +38,23 @@ jobs:
           # Exit 124 (timeout) means the gateway started cleanly and
           # we killed it. Anything else is a startup failure.
           grep -F "MCP-over-HTTP on http" /tmp/gateway.stderr
+
+      - name: Verify --version subcommand
+        run: |
+          # --version must succeed WITHOUT any env vars set — it's the
+          # first thing install.sh runs to decide install-vs-upgrade, on
+          # a machine where keys.env doesn't yet exist.
+          OUT="$(./dist/cookiedclaw-gateway-linux-x64 --version)"
+          echo "version output: $OUT"
+          # Must be a semver-shaped string, no warnings, no env-related noise.
+          echo "$OUT" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+
+      - name: Verify --help subcommand
+        run: |
+          ./dist/cookiedclaw-gateway-linux-x64 --help | grep -F 'cookiedclaw-gateway update'
+
+      - name: Verify version.ts matches package.json shape
+        run: |
+          # Guard against forgetting to bump version.ts in a release PR.
+          # Fails CI if anyone leaves a placeholder string in there.
+          grep -Eq 'VERSION = "[0-9]+\.[0-9]+\.[0-9]+"' src/version.ts
