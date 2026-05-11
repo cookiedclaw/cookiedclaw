@@ -353,7 +353,19 @@ export async function handleProgress(p: ProgressPayload): Promise<void> {
     const state = chats.get(chatId) ?? { events: [] };
     chats.set(chatId, state);
     startTyping(chatId);
-    if (isReply) continue; // typing only — reply isn't progress
+    if (isReply) {
+      // Close out the previous progress block on reply.pre: tools that
+      // fire AFTER a mid-turn reply should start a fresh bubble
+      // chronologically below the reply, not keep editing the now-stale
+      // bubble that's now visually above the reply. The old bubble
+      // stays in chat history as a frozen snapshot of what got done
+      // before the reply landed.
+      if (p.phase === "pre") {
+        state.events = [];
+        state.progressMessageId = undefined;
+      }
+      continue; // typing only — reply isn't progress
+    }
     applyEvent(state, p);
     void queueEdit(chatId, () => pushProgress(chatId));
   }

@@ -89,12 +89,12 @@ export function removePending(chatId: string): void {
  * and post (heartbeat force-closed the transport mid-tool, supervisor
  * killed the child, gateway briefly unreachable from the hook script,
  * or the hook subprocess errored on POST), the post never lands and
- * the `running` event sits in the events list forever. The next user
- * inbound then trips `state.events.some(running)` in forwardToCC,
- * which routes through the queued-ack branch (👀 reaction, no "🤔
- * Thinking…", no state reset) — leaving the user with no progress UI
- * for the new turn and a progress-message id pointing at a Telegram
- * message that may already be too old to edit.
+ * the `running` event sits in the events list. When CC reboots and
+ * resumes processing the queued user message WITHOUT a new inbound
+ * (so forwardToCC's reset doesn't fire), the next PreToolUse appends
+ * to a list that still shows "⏳ Bash: ..." stuck on running, and
+ * pushProgress tries to edit a Telegram message that may already be
+ * too old to touch.
  *
  * Pruning on every session-open is a coarse cleanup but matches the
  * semantic: a fresh MCP session means whatever was "in flight" before
