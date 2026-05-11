@@ -21,7 +21,7 @@ import {
   stopTyping,
 } from "./chat-state.ts";
 import { sendFormatted, senderDisplayName } from "./format.ts";
-import { broadcastNotification } from "./live-servers.ts";
+import { broadcastNotification, liveServers } from "./live-servers.ts";
 import { dlog, stopFlag } from "./paths.ts";
 import { deleteProgressMessage, schedulePush } from "./progress.ts";
 import { unlink } from "node:fs/promises";
@@ -48,7 +48,20 @@ function formatSkillsListMessage(): string {
 /**
  * Forward an inbound user message into CC's session as a `<channel>`
  * notification. Sets active chat (for permission-relay routing), adds
- * to pendingChats (for progress fan-out), resets this chat's tool log.
+ * to pendingChats (for progress fan-out), resets this chat's tool log,
+ * schedules a "🤔 Thinking…" progress bubble.
+ *
+ * No queueing or in-flight detection on this side — CC's MCP client
+ * handles its own notification queue. We just always forward and
+ * always reset the per-chat progress UI; if the user spams mid-turn,
+ * the previous turn's progress message stays in chat history as a
+ * frozen snapshot and a fresh bubble starts for the new turn.
+ *
+ * If no MCP adapter is currently connected (CC crashed, hasn't booted,
+ * dev-channels prompt blocking it, etc.) we short-circuit with a user-
+ * facing error including the `tmux attach` command — silently dropping
+ * the message and showing "🤔 Thinking…" would be a lie. The "Thinking"
+ * UI is only shown when we KNOW a live adapter will see the message.
  *
  * Typing indicator is NOT started here — it kicks on from the first
  * `PreToolUse` hook event of the turn (see progress.ts), so users only
@@ -67,29 +80,44 @@ async function forwardToCC(
   attachmentPath?: string,
   extraMeta?: Record<string, string>,
 ): Promise<void> {
+  // Bail out fast if no MCP adapter is connected — broadcastNotification
+  // would drop the message on the floor and the user would see "🤔
+  // Thinking…" with no agent on the other end. Surface the actual state
+  // with a tmux-attach hint so they can SSH into the host and unblock CC
+  // (login prompt, dev-channels dialog, crashed process, …). Done
+  // BEFORE any state mutation so a transient disconnect doesn't dirty
+  // pendingChats / activeChatId.
+  if (liveServers.size === 0) {
+    const tmuxSession = process.env.COOKIEDCLAW_TMUX_SESSION ?? "cookiedclaw";
+    dlog(
+      `inbound dropped (no MCP adapter): chat=${chatId} sender=${senderId} msg=${messageId}`,
+    );
+    try {
+      await sendFormatted(
+        Number(chatId),
+        `⚠️ Gateway received your message, but no Claude Code session is connected via MCP — nothing was forwarded.\n\nSSH into the host and attach to investigate (login prompt, dev-channels dialog, crashed process, …):\n\n\`tmux attach -t ${tmuxSession}\``,
+      );
+    } catch (err) {
+      console.error(
+        `[telegram] couldn't send mcp-offline notice to ${chatId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    return;
+  }
   setActiveChatId(chatId);
   addPending(chatId);
-  // Determine whether this chat already has a tool call in flight. If
-  // it does, the user is spamming on top of a working agent — we MUST
-  // NOT wipe the events list / progress message: doing so would orphan
-  // the in-flight tool's `pre` event so the matching `post` lands
-  // without a partner, the live progress message gets detached from
-  // its id and replaced by a fresh "🤔 Thinking…" bubble, and the
-  // user sees their tool-call log "fall off" into limbo. Instead we
-  // keep the existing log intact and ack the new message with a 👀
-  // reaction so the user knows it landed and is queued behind the
-  // current turn.
+  // Fresh user message = fresh turn from the user's perspective. Reset
+  // the events list + drop the progress-message id; pushProgress will
+  // send a new "🤔 Thinking…" bubble. CC's MCP client handles its own
+  // notification queue, so we don't need any "in-flight" cleverness on
+  // this side — if a `post` lands later for a tool whose `pre` is gone,
+  // applyEvent's no-match branch pushes a standalone "done" entry into
+  // the new bubble. The previous turn's progress message stays in chat
+  // history as a frozen snapshot of what got done before this message.
   let state = chats.get(chatId);
-  const inFlight = state?.events.some((e) => e.status === "running") ?? false;
   if (state) {
-    if (!inFlight) {
-      state.events = [];
-      state.progressMessageId = undefined;
-    }
-    // else: leave events + progressMessageId alone; pending tool's
-    // post will still match its pre, the live progress bubble keeps
-    // updating, and the agent will see this new channel notification
-    // after its current turn completes.
+    state.events = [];
+    state.progressMessageId = undefined;
   } else {
     state = { events: [] };
     chats.set(chatId, state);
@@ -97,31 +125,13 @@ async function forwardToCC(
   // New user message = clear any /stop flag from a prior turn so the
   // PreToolUse hook stops blocking non-reply tools.
   unlink(stopFlag).catch(() => {});
-  if (inFlight) {
-    // Subtle ack: react to the user's own message rather than spawn a
-    // competing chat bubble. 👀 is in Telegram's free reaction set so
-    // it works without paid reactions enabled on the chat.
-    bot.api
-      .setMessageReaction(Number(chatId), messageId, [
-        { type: "emoji", emoji: "👀" },
-      ])
-      .catch((err: unknown) => {
-        // Reactions can fail (chat doesn't allow reactions, message
-        // too old, rate limit) — degrade silently, the message has
-        // still been forwarded to CC below.
-        dlog(
-          `queued-ack reaction failed: ${err instanceof Error ? err.message : err}`,
-        );
-      });
-  } else {
-    // Idle (or fresh chat): schedule a "🤔 Thinking…" progress message
-    // immediately. If the agent calls its first tool within the 200ms
-    // debounce window, the same push picks up the tool-event state.
-    // If not (e.g. agent thinks for several seconds before any tool),
-    // the user sees a Thinking bubble within 200ms instead of staring
-    // at the typing indicator alone.
-    schedulePush(chatId);
-  }
+  // Schedule a "🤔 Thinking…" progress message immediately. If the
+  // agent calls its first tool within the 200ms debounce window, the
+  // same push picks up the tool-event state. If not (e.g. agent thinks
+  // for several seconds before any tool), the user sees a Thinking
+  // bubble within 200ms instead of staring at the typing indicator
+  // alone.
+  schedulePush(chatId);
   dlog(
     `inbound: chat=${chatId} sender=${senderId} msg=${messageId}${attachmentPath ? ` attachment=${attachmentPath}` : ""}`,
   );
