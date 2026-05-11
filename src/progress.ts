@@ -135,7 +135,7 @@ function formatEventLine(e: ToolEvent): string {
   return `${status} ${prefix} ${display}: ${e.inputSummary}${dur}${errPart}`;
 }
 
-function renderProgress(events: ToolEvent[]): string {
+export function renderProgress(events: ToolEvent[]): string {
   if (events.length === 0) return "🤔 Thinking…";
   const lines = events.map(formatEventLine);
   const full = lines.join("\n");
@@ -241,7 +241,7 @@ export type ProgressPayload =
  * `post` (or pushes a standalone done/error if there's no match —
  * defensive for chats that joined pending mid-flight).
  */
-function applyEvent(
+export function applyEvent(
   state: ChatState,
   p: Extract<ProgressPayload, { phase: "pre" | "post" }>,
 ): void {
