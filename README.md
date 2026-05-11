@@ -47,6 +47,32 @@ Planned: `-codex`, `-opencode`.
                                                                 …)
 ```
 
+## Install (end users)
+
+One-liner — picks the right binary for your platform, downloads + sha256-verifies, drops into `~/.cookiedclaw/bin/`:
+
+```bash
+curl -fsSL https://cookiedclaw.com/install.sh | bash
+```
+
+If a previous install is already there:
+- **v0.3.0 or later** → delegates to `cookiedclaw-gateway update` (same logic, single source of truth)
+- **older / no `--version`** → in-script swap with `.bak` rotation + systemd restart if active
+
+After the binary's on disk, configuration (Telegram token, identity files, systemd unit) is handled by the [Claude Code adapter's setup wizard](https://github.com/cookiedclaw/cookiedclaw-claude-code) — `/cookiedclaw:setup` inside CC.
+
+### Subcommands
+
+```bash
+cookiedclaw-gateway              # default: run the gateway
+cookiedclaw-gateway --version    # print version
+cookiedclaw-gateway --help       # usage
+cookiedclaw-gateway update       # fetch latest release, sha256 verify,
+                                 # atomic swap, restart systemd if active
+```
+
+The `update` subcommand checks `~/.cookiedclaw/bin/cookiedclaw-gateway` against the latest published tag, refuses to downgrade if you're on a dev build ahead of latest, and only touches the systemd unit if it's already `active` (fresh installs that haven't been `systemctl enable`d skip the restart cleanly).
+
 ## Run it (development)
 
 ```bash
@@ -97,9 +123,14 @@ Intel-mac (`darwin-x64`) is intentionally not built — GitHub Actions removed t
 ## Roadmap
 
 - **Adapter→gateway skill catalog push** — runtime adapters tell the gateway what skills are available so `/skills` can render the unified menu (today the gateway shows a placeholder).
-- **HTTP-mediated permission relay** — _shipped_: `POST /permission-request` now accepts adapter-initiated verdict requests (used by `cookiedclaw-cursor`, which can't speak the MCP `permission_request` notification CC uses). Gateway dispatches `[✓ Allow] [✗ Deny] [❔ Ask Locally]` inline buttons, awaits verdict, returns to caller.
 - **Multi-adapter coordination** — gateway holds a presence map of connected adapters and routes inbound DMs to whichever runtime owns the chat (per-workspace agent identity).
 - **Multi-messenger transport plugins** — Discord, Slack, iMessage, Signal, email each as a transport module under the same paired-user/state layer.
+
+Shipped recently:
+
+- **HTTP-mediated permission relay** — `POST /permission-request` accepts adapter-initiated verdict requests (used by `cookiedclaw-cursor`, which can't speak the MCP `permission_request` notification CC uses). Gateway dispatches `[✓ Allow] [✗ Deny] [❔ Ask Locally]` inline buttons, awaits verdict, returns to caller.
+- **CLI subcommands + self-update** — `cookiedclaw-gateway --version` / `update` (v0.3.0).
+- **One-liner install** — `curl -fsSL https://cookiedclaw.com/install.sh | bash`.
 - **GitHub Actions release workflow** — `build:all` on tag, attach binaries to release.
 
 ## Related
