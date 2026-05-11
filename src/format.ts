@@ -36,7 +36,7 @@ const MAX_TELEGRAM_MESSAGE = 3800;
  * under MAX_TELEGRAM_MESSAGE without slicing inside a word or marker.
  * Last-resort: hard slice at the limit.
  */
-function chunkForTelegram(text: string): string[] {
+export function chunkForTelegram(text: string): string[] {
   if (text.length <= MAX_TELEGRAM_MESSAGE) return [text];
   const chunks: string[] = [];
   let remaining = text;

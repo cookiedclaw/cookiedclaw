@@ -12,6 +12,9 @@
   "scripts": {
     "gateway": "bun ./src/gateway.ts",
     "typecheck": "tsc --noEmit",
+    "test": "bun test tests",
+    "test:smoke": "bun ./tests/smoke.ts",
+    "test:all": "bun run test && bun run test:smoke",
     "build:linux-arm64": "bun build --compile --target=bun-linux-arm64 ./src/gateway.ts --outfile dist/cookiedclaw-gateway-linux-arm64",
     "build:linux-x64": "bun build --compile --target=bun-linux-x64 ./src/gateway.ts --outfile dist/cookiedclaw-gateway-linux-x64",
     "build:darwin-arm64": "bun build --compile --target=bun-darwin-arm64 ./src/gateway.ts --outfile dist/cookiedclaw-gateway-darwin-arm64",
